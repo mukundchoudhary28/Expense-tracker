@@ -1,8 +1,11 @@
 from datetime import date as DateType
 from decimal import Decimal
-from sqlalchemy import String, Numeric, Date
+
+from sqlalchemy import Date, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
+
 from .database import Base
+
 
 class Expense(Base):
     __tablename__ = "expenses"

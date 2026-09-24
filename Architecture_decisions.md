@@ -122,3 +122,73 @@ which never touches the host's public interface.
   only while the database is unreachable; must move to a secret store
   before the database is exposed to other hosts (Stage 7).
 - Anyone with SSH access to the server can reach all services.
+
+
+## ADR-004: Terminate TLS at a Caddy reverse proxy
+
+**Status:** Accepted (Stage 2, v0.3). Updates ADR-003 (public entry point
+moves from nginx on 8080 to Caddy on 80/443).
+
+**Context**
+The app was served over plain HTTP on `http://<ip>:8080`: traffic was
+unencrypted, the address changed whenever the instance was stopped, and
+there was no domain name. We need a stable, human-readable address served
+over HTTPS with a valid certificate, without adding manual certificate
+management.
+
+Supporting changes made in this stage:
+- An Elastic IP is attached to the instance so its public address is stable.
+- A learning domain was purchased (1-year, auto-renew off). DNS is hosted at
+  the registrar with an A record `expenses` → Elastic IP, because Route 53 is
+  not available on the AWS Free plan.
+
+**Decision**
+Add Caddy as the single public entry point in front of nginx:
+- Caddy listens on 80 and 443, obtains and renews certificates from
+  Let's Encrypt automatically, redirects HTTP to HTTPS, and reverse-proxies
+  to `frontend:80` over the internal Docker network.
+- nginx is unchanged: it still serves the React build and proxies `/api/`
+  to the backend.
+- Caddy runs only in production, defined in a separate override file
+  (`docker-compose.prod.yml`). The base `docker-compose.yml` stays identical
+  across laptop and server.
+- The domain is supplied via a git-ignored `.env` file on the server
+  (`DOMAIN=...`), not hardcoded in the repository.
+- The frontend port is now bound to `127.0.0.1:8080`, and port 8080 is
+  removed from the security group. Public ports: 22 (my IP), 80, 443.
+- Certificates persist in the `caddy_data` volume.
+
+**Why**
+- Automatic HTTPS with a two-line config; no Certbot, cron jobs or manual
+  renewals.
+- TLS terminates at one place, so the rest of the stack needs no changes.
+- Traffic from Caddy to nginx never leaves the host (internal Docker
+  network), so plain HTTP behind the proxy is acceptable.
+- The override file prevents Caddy from running on a laptop, where it would
+  fail certificate validation and risk Let's Encrypt rate limits.
+
+**Alternatives considered**
+- nginx + Certbot: widely used, but requires separate certificate tooling,
+  renewal scheduling and more configuration.
+- AWS Application Load Balancer + ACM certificate: managed, free
+  certificates, but adds hourly load balancer cost and complexity.
+  Revisit in Stage 11 (ECS Fargate).
+- Route 53 for DNS: unavailable on the Free plan; registrar DNS is
+  sufficient for a single A record.
+
+**Consequences / known risks**
+- Two proxies in the request path (Caddy → nginx) add a small amount of
+  complexity; they could be merged later.
+- Certificate renewal depends on port 80 (or 443) staying reachable and DNS
+  continuing to point at the Elastic IP. A failed renewal is not detected:
+  there is no expiry monitoring, and Let's Encrypt no longer sends expiry
+  emails (addressed in Stage 8).
+- Losing the `caddy_data` volume forces certificate re-issuance and could
+  hit Let's Encrypt rate limits.
+- Plain HTTP between Caddy and nginx would be unacceptable if they ran on
+  separate hosts, or under policies requiring encryption in transit
+  everywhere.
+- The Elastic IP incurs an hourly charge and must be released when the
+  project is torn down.
+- The learning domain expires in one year; any links shared using it will
+  break then.
