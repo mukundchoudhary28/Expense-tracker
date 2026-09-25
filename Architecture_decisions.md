@@ -192,3 +192,60 @@ Add Caddy as the single public entry point in front of nginx:
   project is torn down.
 - The learning domain expires in one year; any links shared using it will
   break then.
+
+
+## ADR-005: Continuous integration with GitHub Actions and a protected main branch
+
+**Status:** Accepted (Stage 3, v0.4).
+
+**Context**
+Changes were pushed directly to `main` with no automated checks. Nothing
+guaranteed that code was tested, consistently formatted, or that the
+Docker images still built. Bugs could reach the server unnoticed, and
+quality depended entirely on remembering to check manually.
+
+**Decision**
+Every change reaches `main` through a pull request that must pass CI.
+
+*Backend tests*
+- pytest with FastAPI's `TestClient` (using `httpx2`; `httpx` triggers a
+  Starlette deprecation warning).
+- Tests run against a real PostgreSQL 17 database, never SQLite or mocks.
+- Tests use a dedicated `expenses_test` database, never the development
+  database. The table is truncated before each test so tests are
+  independent of each other.
+- Tests cover both accepted input and rejected input (negative/zero
+  amounts, empty descriptions, invalid or missing dates).
+- Dev tools (pytest, httpx2, ruff) are uv dev dependencies and are excluded
+  from the production image via `uv sync --no-dev`.
+
+*Linting and formatting*
+- ruff for linting and formatting, including the `B` (bugbear) and `DTZ`
+  (timezone) rule sets. CI runs `ruff format --check`, so unformatted code
+  fails the build.
+
+*CI pipeline* (`.github/workflows/ci.yml`, on every PR and push to `main`)
+- `backend`: install from `uv.lock` (`--frozen`), lint, format check, tests,
+  with a PostgreSQL service container.
+- `frontend`: `npm ci` and `npm run build`.
+- `docker`: builds all images; runs only if both jobs above pass.
+
+*Branch protection on `main`*
+- Pull request required; `backend`, `frontend` and `docker` checks must
+  pass; force pushes blocked; direct pushes rejected.
+
+*Local development*
+- Docker's Postgres is published on `127.0.0.1:5433` because a Windows
+  PostgreSQL installation occupies 5432. Tests connect via `127.0.0.1`
+  (avoiding IPv6 `localhost` resolution issues on Windows) with a 5-second
+  connection timeout so failures surface as errors rather than hangs.
+- CI is unaffected: it uses its own Postgres on 5432 and sets
+  `DATABASE_URL` explicitly.
+
+**Why**
+- Every change is checked the same way, automatically, before it can merge.
+- Testing against real Postgres catches behaviour that SQLite or mocks
+  would hide (e.g. `Numeric` precision, SQL dialect differences).
+- Parallel jobs keep CI fast; the Docker job ensures the deployable
+  artifact still builds.
+-
