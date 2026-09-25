@@ -249,3 +249,122 @@ Every change reaches `main` through a pull request that must pass CI.
 - Parallel jobs keep CI fast; the Docker job ensures the deployable
   artifact still builds.
 -
+
+## ADR-007: Continuous deployment via ECR images and AWS SSM
+
+**Status:** Accepted (Stage 4, v0.5). Updates ADR-002 (deployment is no
+longer manual).
+
+**Context**
+Deployments were manual: SSH into the server, `git pull`, and
+`docker compose up --build`. Images were built on the production server,
+using its limited CPU and RAM, and every deploy required SSH access and
+remembering the exact steps. CI verified code but nothing delivered it.
+
+**Decision**
+Every merge to `main` is automatically built, published, deployed and
+verified.
+
+*Pipeline* (extends `.github/workflows/ci.yml`, runs only on pushes to `main`)
+1. `backend`, `frontend`, `docker`: existing checks (ADR-005).
+2. `publish`: builds backend and frontend images and pushes them to Amazon
+   ECR, tagged with the full commit SHA.
+3. `deploy`: sends a command to the EC2 instance through AWS Systems Manager
+   (SSM Run Command). The server runs `git pull` and `deploy.sh <sha>`,
+   which logs into ECR, pulls the tagged images and restarts containers
+   with `--no-build`. The server's output is printed in the GitHub log.
+4. Smoke test: calls `https://<domain>/api/health` on the live site; the
+   deploy fails if it doesn't respond successfully within about a minute.
+
+*Images*
+- Two private ECR repositories in `ap-south-1`: `expense-tracker-backend`
+  and `expense-tracker-frontend`.
+- Tag immutability enabled: a SHA tag always refers to exactly one build.
+- Lifecycle policy keeps the last 10 images per repository.
+- `docker-compose.prod.yml` sets `image:` for backend and frontend; the base
+  file keeps `build:` for local development.
+
+*Authentication, no stored credentials*
+- GitHub Actions authenticates to AWS via OIDC. The IAM role
+  `github-actions-expense-tracker` trusts only this repository's `main`
+  branch; AWS issues short-lived credentials per run.
+- The trust policy's `sub` condition pins GitHub's immutable owner and
+  repository IDs:
+  `repo:mukundchoudhary28@24253616/Expense-tracker@1383989999:ref:refs/heads/main`.
+- The role's permissions are least-privilege: push to the two ECR
+  repositories, send commands to this one instance via
+  `AWS-RunShellScript`, and read command results.
+- The EC2 instance has its own role (`expense-tracker-ec2`) with
+  `AmazonSSMManagedInstanceCore` and `AmazonEC2ContainerRegistryReadOnly`.
+  No AWS keys exist on the server.
+
+*Server configuration*
+- `.env` on the server holds `DOMAIN`, `REGISTRY`, `COMPOSE_FILE`,
+  `COMPOSE_PROJECT_NAME` and the currently deployed `IMAGE_TAG` (written by
+  `deploy.sh`, so restarts and manual compose commands keep using the
+  deployed version).
+- `COMPOSE_PROJECT_NAME=expense-tracker` is pinned so the Postgres volume
+  (`expense-tracker_pgdata`) cannot be orphaned by a folder rename.
+- `.gitattributes` forces LF line endings for `*.sh`, so scripts committed
+  from Windows run correctly on Linux.
+- Deploys run under a `concurrency: production` group, so overlapping
+  merges deploy one at a time.
+
+*Rollback*
+- Manual: on the server, `bash deploy.sh <previous-sha>`. Fast, because
+  the image already exists in ECR and nothing is rebuilt.
+
+**Why**
+- Build once, deploy the same artifact: the image that passed CI is exactly
+  what runs in production.
+- SHA tags make every running version traceable to a commit and make
+  rollbacks a matter of pointing at an older tag.
+- OIDC removes long-lived AWS keys from GitHub entirely; nothing can leak.
+- SSM needs no inbound port: GitHub never connects to the server directly,
+  so the security group stays closed to GitHub's IP ranges.
+- The server no longer builds images, freeing CPU and RAM on a small
+  instance.
+- The smoke test checks the real public URL, so "deployed" means "users can
+  reach it".
+
+**Alternatives considered**
+- SSH from GitHub Actions: simple, but requires a stored private key and
+  opening port 22 to GitHub's large, changing IP ranges.
+- AWS access keys stored as GitHub secrets: works, but long-lived keys can
+  leak and must be rotated.
+- GitHub Container Registry (ghcr.io) instead of ECR: free and simple, but
+  ECR keeps images inside AWS with IAM-based access for the server.
+- `latest` tag instead of SHA: simpler, but ambiguous and makes rollback and
+  auditing unreliable.
+
+**Debugging lessons (setup)**
+- GitHub's OIDC `sub` claim now includes numeric owner and repository IDs.
+  The IAM console's GitHub form generates the older name-only format, which
+  never matches; the trust policy had to be edited by hand. Diagnosed by
+  decoding the token's claims in a temporary workflow step.
+- Case-sensitivity mismatches occurred twice: the GitHub repository is
+  `Expense-tracker`, while ECR names must be lowercase (`expense-tracker-*`)
+  and the server folder must match the deploy script's path.
+- ECR repositories are regional; repositories created in `us-east-1` were
+  invisible to a pipeline targeting `ap-south-1`.
+- A placeholder (`ACCOUNT_ID`) left in the server's `.env` broke the ECR
+  login; hand-edited server configuration is invisible to CI.
+- Order for diagnosing cloud failures: identity (can I authenticate?) →
+  permission (am I allowed?) → resource (does it exist, in this region?) →
+  configuration (are the values right?).
+
+**Consequences / known risks**
+- Deploys cause brief downtime while containers restart; there is no
+  zero-downtime rollout (addressed in Stage 11, ECS).
+- No automatic rollback: a failed smoke test marks the run red, but the
+  broken version stays live until a manual rollback.
+- The server still `git pull`s compose files and scripts, so it depends on
+  GitHub availability and the repository staying public.
+- Images are built twice per merge (`docker` job and `publish` job); build
+  caching or reusing the tested image could remove the duplication.
+- Server configuration in `.env` is edited by hand over SSH (addressed in
+  Stage 7).
+- Only one production environment exists; changes go straight from `main`
+  to users (staging comes in Stage 10).
+- The SSM agent must stay running and the instance role attached, or deploys
+  fail.
