@@ -14,6 +14,10 @@ services:
     depends_on:
       - frontend
     restart: unless-stopped
+  backend:
+    image: ${REGISTRY}/expense-tracker-backend:${IMAGE_TAG}
+  frontend:
+    image: ${REGISTRY}/expense-tracker-frontend:${IMAGE_TAG}
 
 volumes:
   caddy_data:
