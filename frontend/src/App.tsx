@@ -40,7 +40,7 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Expense Tracker</h1>
+        <h1>Expense Tracker v2</h1>
         <p className="muted">Log what you spend and see where it goes.</p>
       </header>
 
