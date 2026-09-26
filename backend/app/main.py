@@ -1,11 +1,12 @@
 from fastapi import FastAPI
 from sqlalchemy import select
 
-from .database import Base, DbSession, engine
+# from .database import Base, DbSession, engine
+from .database import DbSession
 from .models import Expense
 from .schemas import ExpenseCreate, ExpenseRead
 
-Base.metadata.create_all(bind=engine)
+# Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Expense Tracker API", version="1.0.0")
 
