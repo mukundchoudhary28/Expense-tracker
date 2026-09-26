@@ -1,5 +1,8 @@
 import os
 
+from alembic import command
+from alembic.config import Config
+
 os.environ.setdefault(
     "DATABASE_URL",
     "postgresql+psycopg://app:app@127.0.0.1:5432/expenses_test?connect_timeout=5",
@@ -25,3 +28,9 @@ def clean_db():
 def client():
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture(scope="session", autouse=True)
+def migrate_database():
+    """Bring the test database schema up to date once per test run."""
+    command.upgrade(Config("alembic.ini"), "head")
